@@ -23,7 +23,6 @@ import java.util.List;
 import org.kaaproject.kaa.common.dto.ApplicationDto;
 import org.kaaproject.kaa.common.dto.event.ApplicationEventFamilyMapDto;
 import org.kaaproject.kaa.common.dto.event.EventClassFamilyDto;
-import org.kaaproject.kaa.common.dto.event.EventClassFamilyVersionDto;
 import org.kaaproject.kaa.common.dto.user.UserVerifierDto;
 import org.kaaproject.kaa.examples.common.AbstractDemoBuilder;
 import org.kaaproject.kaa.examples.common.KaaDemoBuilder;
@@ -96,10 +95,13 @@ public class EventDemoBuilder extends AbstractDemoBuilder {
         logger.info("Finished loading 'Event Demo Application' data.");
     }
 
+    void test() throws  Exception {
+        addEventClassFamilyVersion(null, null, null, "thermostatEventClassFamily.json");
+    }
+
     public static void main(String[] args) throws Throwable {
         EventDemoBuilder e = new EventDemoBuilder();
-        AdminClient client = new AdminClient("127.0.0.1", 8080);
-        e.buildDemoApplicationImpl(client);
+        e.test();
     }
 
 }

@@ -19,9 +19,13 @@ package org.kaaproject.kaa.examples.common;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import javax.xml.bind.JAXBContext;
 import javax.xml.bind.JAXBException;
@@ -29,11 +33,14 @@ import javax.xml.bind.Unmarshaller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import net.iharder.Base64;
 
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang.StringUtils;
+import org.kaaproject.avro.ui.shared.FqnVersion;
 import org.kaaproject.kaa.common.dto.ApplicationDto;
 import org.kaaproject.kaa.common.dto.KaaAuthorityDto;
 import org.kaaproject.kaa.common.dto.admin.SdkProfileDto;
@@ -41,6 +48,7 @@ import org.kaaproject.kaa.common.dto.admin.SdkTokenDto;
 import org.kaaproject.kaa.common.dto.admin.TenantUserDto;
 import org.kaaproject.kaa.common.dto.admin.UserDto;
 import org.kaaproject.kaa.common.dto.ctl.CTLSchemaDto;
+import org.kaaproject.kaa.common.dto.ctl.CTLSchemaMetaInfoDto;
 import org.kaaproject.kaa.common.dto.event.ApplicationEventAction;
 import org.kaaproject.kaa.common.dto.event.ApplicationEventFamilyMapDto;
 import org.kaaproject.kaa.common.dto.event.ApplicationEventMapDto;
@@ -328,26 +336,53 @@ public abstract class AbstractDemoBuilder implements DemoBuilder {
 
     protected void addEventClassFamilyVersion(EventClassFamilyDto eventClassFamily, AdminClient client,
                                               String tenantId, String resourcesPath) throws Exception{
+//        List<String> ctlBodies = new ArrayList<>(); //todo remove me nahren
+
         EventClassFamilyVersionDto eventClassFamilyVersion = new EventClassFamilyVersionDto();
         try {
             String body = FileUtils.readResource(getResourcePath(resourcesPath));
+
             JsonNode json = new ObjectMapper().readTree(body);
             List<EventClassDto> records = new ArrayList<>();
-            for (JsonNode ctlJson : json) {
-                ((ObjectNode) ctlJson).put("version", 1);
-                String fqn = ctlJson.get("namespace").asText() + "." + ctlJson.get("name").asText();
-                EventClassType classType = EventClassType.valueOf(ctlJson.get("classType").asText().toUpperCase());
-                ((ObjectNode)ctlJson).remove("classType");
-                String ctlBody = ctlJson.toString();
 
-                CTLSchemaDto ctlSchema = client.saveCTLSchemaWithAppToken(ctlBody, tenantId, null);
-                EventClassDto ec = new EventClassDto();
-                ec.setFqn(fqn);
-                ec.setType(classType);
-                ec.setCtlSchemaId(ctlSchema.getId());
-                ec.setName("Test event class in event demo");
-                records.add(ec);
+            //processing classType = OBJECT (must be saved before EVENT)
+            Set<FqnVersion> ctlObjects = new HashSet<>();
+            for (JsonNode ctlJson : json) {
+                if (ctlJson.get("classType") != null && ctlJson.get("classType").asText().toUpperCase().equals("OBJECT")) {
+                    String fqn = ctlJson.get("namespace").asText() + "." + ctlJson.get("name").asText();
+                    ((ObjectNode) ctlJson).put("version", 1);
+                    ((ObjectNode)ctlJson).remove("classType");
+                    String ctlBody = ctlJson.toString();
+//                    ctlBodies.add(ctlBody);
+//                    CTLSchemaDto ctlSchema = new CTLSchemaDto(); ctlSchema.setId("222"); ctlSchema.setVersion(1); CTLSchemaMetaInfoDto meta = new CTLSchemaMetaInfoDto(fqn); ctlSchema.setMetaInfo(meta);
+                    CTLSchemaDto ctlSchema = client.saveCTLSchemaWithAppToken(ctlBody, tenantId, null);
+                    FqnVersion fqnVersion = new FqnVersion(ctlSchema.getMetaInfo().getFqn(), ctlSchema.getVersion());
+                    ctlObjects.add(fqnVersion);
+
+                    addEventClass(records, EventClassType.OBJECT, fqn, ctlSchema.getId());
+                }
             }
+
+            //processing classType = EVENT
+            for (JsonNode ctlJson : json) {
+                if (ctlJson.get("classType") != null && ctlJson.get("classType").asText().toUpperCase().equals("EVENT")) {
+                    String fqn = ctlJson.get("namespace").asText() + "." + ctlJson.get("name").asText();
+                    ((ObjectNode) ctlJson).put("version", 1);
+                    ((ObjectNode)ctlJson).remove("classType");
+
+                    JsonNode fields = ctlJson.get("fields");
+                    Set<FqnVersion> dependencies = checkoutDependenciesInFields(ctlObjects, fields);
+                    if (!dependencies.isEmpty())
+                        putDependenciesInEvent((ObjectNode)ctlJson, dependencies);
+                    String ctlBody = ctlJson.toString();
+//                    ctlBodies.add(ctlBody);
+//                    CTLSchemaDto ctlSchema = new CTLSchemaDto(); ctlSchema.setId("111"); ctlSchema.setVersion(1); CTLSchemaMetaInfoDto meta = new CTLSchemaMetaInfoDto(fqn); ctlSchema.setMetaInfo(meta);
+                    CTLSchemaDto ctlSchema = client.saveCTLSchemaWithAppToken(ctlBody, tenantId, null);
+
+                    addEventClass(records, EventClassType.EVENT, fqn, ctlSchema.getId());
+                }
+            }
+
             eventClassFamilyVersion.setRecords(records);
         } catch (IOException e) {
             logger.error("Can't parse JSON resource!");
@@ -355,6 +390,69 @@ public abstract class AbstractDemoBuilder implements DemoBuilder {
         }
 
         client.addEventClassFamilyVersion(eventClassFamily.getId(), eventClassFamilyVersion);
+    }
+
+    private void addEventClass(List<EventClassDto> records, EventClassType classType, String fqn, String ctlId) {
+            EventClassDto ec = new EventClassDto();
+            ec.setFqn(fqn);
+            ec.setType(classType);
+            ec.setCtlSchemaId(ctlId);
+            ec.setName("Test event class in event demo");
+            records.add(ec);
+    }
+
+    private Set<FqnVersion> checkoutDependenciesInFields(Set<FqnVersion> ctlObjects, JsonNode fields) {
+        if (fields == null || !fields.isArray() || fields.size() == 0
+                || ctlObjects.isEmpty()) return Collections.emptySet();
+        String namespace = ctlObjects.iterator().next().getNamespace();
+
+        Set<FqnVersion> dependencies = new HashSet<>();
+
+        for (JsonNode field : fields) {
+            JsonNode types = field.get("type");
+            if (types.isArray()) {
+                for (JsonNode type : types) {
+                    String fqn = completeFqn(type.asText(), namespace);
+                    dependencies.addAll(
+                            ctlObjects.stream()
+                                    .filter(ctlObject -> ctlObject.getFqnString().equals(fqn))
+                                    .collect(Collectors.toSet()));
+                }
+            } else {
+                String fqn = "";
+                if (types.get("items") != null) fqn = types.get("items").asText();
+                else fqn = types.asText();
+
+                String fqnFinal = completeFqn(fqn, namespace);
+                dependencies.addAll(
+                        ctlObjects.stream()
+                                .filter(ctlObject -> ctlObject.getFqnString().equals(fqnFinal))
+                                .collect(Collectors.toSet()));
+            }
+        }
+
+        return dependencies;
+    }
+
+    private boolean isFqn(String fqn) {
+        return fqn.contains(".");
+    }
+
+    private String completeFqn(String fqn, String namespace) {
+        if (!isFqn(fqn)) return namespace + "." + fqn;
+        else return fqn;
+    }
+
+    private void putDependenciesInEvent(ObjectNode ctlEvent, Set<FqnVersion> dependencies) {
+        JsonNodeFactory factory = JsonNodeFactory.instance;
+        ArrayNode array = factory.arrayNode();
+        for (FqnVersion dependency : dependencies) {
+            ObjectNode object = factory.objectNode();
+            object.put("fqn", dependency.getFqnString());
+            object.put("version", dependency.getVersion());
+            array.add(object);
+        }
+        ctlEvent.put("dependencies", array);
     }
     
 }
